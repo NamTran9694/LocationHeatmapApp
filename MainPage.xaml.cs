@@ -7,23 +7,25 @@ using Microsoft.Maui.Controls.Maps;
 
 namespace LocationHeatmapApp;
 
+/// <summary>
+/// Main application logic handling GPS tracking, SQLite persistence, 
+/// and the custom Heatmap rendering engine.
+/// </summary>
 public partial class MainPage : ContentPage
 {
     private readonly LocationDatabase _db;
-    private CancellationTokenSource? _trackingCts;
+    private CancellationTokenSource? _trackingCts; // Manages the lifecycle of the background tracking loop
     private int _savedCount = 0;
 
+    // Keeps track of rendered elements to allow for efficient clearing/refreshing
     private readonly List<Microsoft.Maui.Controls.Maps.Circle> _heatCircles = new();
-
-
- 
 
     public MainPage(LocationDatabase db)
     {
         InitializeComponent();
         _db = db;
 
-        // Update label when slider changes
+        // UI Event: Update the label in real-time as the user adjusts the heat radius slider
         RadiusSlider.ValueChanged += (_, e) =>
         {
             RadiusValueLabel.Text = $"{(int)e.NewValue}";
@@ -31,8 +33,12 @@ public partial class MainPage : ContentPage
     }
 
     // ===== Tracking Loop =====
+    /// <summary>
+    /// Initiates an asynchronous loop that polls GPS coordinates and saves them to SQLite.
+    /// </summary>
     private async void OnStartClicked(object? sender, EventArgs e)
     {
+        // Guard clause: Prevent multiple tracking loops from running simultaneously
         if (_trackingCts != null)
         {
             StatusLabel.Text = "Tracking already running...";
@@ -41,6 +47,7 @@ public partial class MainPage : ContentPage
 
         try
         {
+            // Verify location permissions before accessing hardware
             var status = await Permissions.RequestAsync<Permissions.LocationWhenInUse>();
             if (status != PermissionStatus.Granted)
             {
@@ -51,6 +58,7 @@ public partial class MainPage : ContentPage
             _trackingCts = new CancellationTokenSource();
             StatusLabel.Text = "Tracking started...";
 
+            // Long-running loop: Runs until the user clicks 'Stop' (cancels the token)
             while (!_trackingCts.IsCancellationRequested)
             {
                 var request = new GeolocationRequest(GeolocationAccuracy.Medium, TimeSpan.FromSeconds(10));
@@ -65,11 +73,13 @@ public partial class MainPage : ContentPage
                         TimestampUtc = DateTime.UtcNow
                     };
 
+                    // Persist to SQLite and update the UI counter
                     await _db.AddPointAsync(point);
                     _savedCount++;
 
                     StatusLabel.Text = $"Saved #{_savedCount}: {point.Latitude:F5}, {point.Longitude:F5}";
 
+                    // Center the map on the newest point
                     var mapLocation = new Location(point.Latitude, point.Longitude);
                     MapControl.MoveToRegion(MapSpan.FromCenterAndRadius(mapLocation, Distance.FromKilometers(1)));
                 }
@@ -97,6 +107,9 @@ public partial class MainPage : ContentPage
     }
 
     // ===== Heatmap Rendering =====
+    /// <summary>
+    /// Pulls all stored points from the database and triggers the heatmap redraw.
+    /// </summary>
 
     private async void OnRefreshClicked(object? sender, EventArgs e)
     {
@@ -131,6 +144,9 @@ public partial class MainPage : ContentPage
         }
     }
 
+    /// <summary>
+    /// Removes existing circle elements from the Map component and clears the local cache.
+    /// </summary>
     private void ClearHeatmap()
     {
         foreach (var c in _heatCircles)
@@ -153,13 +169,14 @@ public partial class MainPage : ContentPage
         if (points.Count == 0)
             return;
 
-        // Grid size in degrees. Smaller = more detailed but more circles.
-        // 0.001 degrees ~ 111 meters (latitude). Good for a demo heatmap.
+        // Grid size in degrees. 0.001 deg is roughly 110 meters.
+        // This prevents the app from drawing 10,000 circles if the user stays in one spot.
         const double cellSize = 0.001;
 
         // Bin points: key = (latCell, lonCell)
         var bins = new Dictionary<(int latCell, int lonCell), int>();
 
+        // Binning algorithm: Map each coordinate to a grid cell
         foreach (var p in points)
         {
             int latCell = (int)Math.Floor(p.Latitude / cellSize);
@@ -186,7 +203,7 @@ public partial class MainPage : ContentPage
             double lon = (lonCell + 0.5) * cellSize;
 
             // Intensity from 1..5 based on relative density
-            // More density => add more circles (overlap makes it look hotter)
+            // More density => add more circles
             int intensity = Math.Clamp((int)Math.Ceiling(5.0 * count / maxCount), 1, 3);
 
             for (int i = 0; i < intensity; i++)
@@ -197,8 +214,8 @@ public partial class MainPage : ContentPage
                     Radius = new Distance(radiusMeters*0.3 +(i*10)), // slightly larger layers
                     StrokeWidth = 1,
                     StrokeColor = Colors.Red,
-                    // Heat effect: red-ish fill with transparency
-                    FillColor = Color.FromRgba(255, 0, 0, 100) // low alpha; stacking increases "heat"
+                    // Opacity layering: Multiple 100/255 alpha circles create a darker "Hot" spot
+                    FillColor = Color.FromRgba(255, 0, 0, 100)
                 };
 
                 MapControl.MapElements.Add(circle);
@@ -216,6 +233,8 @@ public partial class MainPage : ContentPage
         // Rough radius: half the diagonal distance (km)
         double latKm = (maxLat - minLat) * 111.0;
         double lonKm = (maxLon - minLon) * 111.0 * Math.Cos(center.Latitude * Math.PI / 180.0);
+
+        // Use Pythagorean theorem for the diagonal distance
         double radiusKm = Math.Max(0.5, Math.Sqrt(latKm * latKm + lonKm * lonKm) / 2.0);
 
         MapControl.MoveToRegion(
